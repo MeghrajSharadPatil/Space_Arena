@@ -1,0 +1,6 @@
+{
+  "name": "SPACE ARENA",
+  "description": "Real-time multiplayer sci-fi space shooter where 2-8 players pilot custom starfighters, battle enemy waves and multi-phase bosses, or compete in Free-For-All combat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
