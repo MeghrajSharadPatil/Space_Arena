@@ -7,16 +7,10 @@ import {
   VolumeX,
   Maximize2,
   Play,
-  Users,
-  Shield,
-  Zap,
-  Crosshair,
-  Trophy,
-  Settings as SettingsIcon,
-  HelpCircle,
   LogOut,
   RefreshCw,
   Pause,
+  Server,
 } from 'lucide-react';
 import {
   ARENA_HEIGHT,
@@ -33,6 +27,7 @@ import {
 } from './shared/types.ts';
 import { soundEngine } from './client/audio.ts';
 import { ArenaRenderer, renderMinimap } from './client/renderer.ts';
+import { LocalDevArena } from './client/localDevEngine.ts';
 
 type NavTab = 'MENU' | 'ROOMS' | 'HANGAR' | 'LEADERBOARD' | 'HOW_TO_PLAY';
 
@@ -58,7 +53,6 @@ const ShipPreviewCanvas: React.FC<ShipPreviewProps> = ({ shipType, color, size =
       angle += 0.012;
       ctx.clearRect(0, 0, size, size);
 
-      // Subtle radial grid
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.14)';
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -79,14 +73,7 @@ const ShipPreviewCanvas: React.FC<ShipPreviewProps> = ({ shipType, color, size =
     return () => cancelAnimationFrame(animId);
   }, [shipType, color, size]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      width={size}
-      height={size}
-      className="mx-auto block"
-    />
-  );
+  return <canvas ref={canvasRef} width={size} height={size} className="mx-auto block" />;
 };
 
 function getOrCreatePilotId(): string {
@@ -100,9 +87,13 @@ function getOrCreatePilotId(): string {
 }
 
 export default function App() {
+  const configuredEnvBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
+
   const [pilotId] = useState<string>(() => getOrCreatePilotId());
   const [username, setUsername] = useState<string>(
-    () => sessionStorage.getItem('space_arena_username') || `PILOT_${pilotId.slice(4, 8).toUpperCase()}`
+    () =>
+      sessionStorage.getItem('space_arena_username') ||
+      `PILOT_${pilotId.slice(4, 8).toUpperCase()}`
   );
   const [selectedShip, setSelectedShip] = useState<ShipType>(
     () => (localStorage.getItem('space_arena_ship') as ShipType) || 'vanguard'
@@ -131,6 +122,9 @@ export default function App() {
   const [publicRooms, setPublicRooms] = useState<RoomSummary[]>([]);
   const [roomSnapshot, setRoomSnapshot] = useState<GameSnapshot | null>(null);
   const roomSnapshotRef = useRef<GameSnapshot | null>(null);
+  const [isLocalDevSession, setIsLocalDevSession] = useState(false);
+  const localDevArenaRef = useRef<LocalDevArena | null>(null);
+
   const [profile, setProfile] = useState<PilotProfile | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [leaderboardFilter, setLeaderboardFilter] = useState<'ALL' | GameMode>('ALL');
@@ -172,20 +166,19 @@ export default function App() {
     localStorage.setItem('space_arena_color', selectedColor);
   }, [username, selectedShip, selectedColor]);
 
-  // Connect Socket.IO
+  // Connect Socket.IO (Uses VITE_BACKEND_URL if configured, or same-origin in local full-stack dev)
   useEffect(() => {
-    const backendUrl = import.meta.env.VITE_BACKEND_URL || undefined;
-    const socket = io(backendUrl, {
+    const targetUrl = configuredEnvBackendUrl || undefined;
+    const socket = io(targetUrl, {
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 20,
-      reconnectionDelay: 1000,
+      reconnectionAttempts: 15,
+      reconnectionDelay: 1500,
     });
     socketRef.current = socket;
 
     socket.on('connect', () => {
       setConnected(true);
-      setErrorBanner(null);
       socket.emit(
         'profile:sync',
         { pilotId, username, shipType: selectedShip, color: selectedColor },
@@ -200,12 +193,17 @@ export default function App() {
       setConnected(false);
     });
 
+    socket.on('connect_error', () => {
+      setConnected(false);
+    });
+
     socket.on('rooms:list', (rooms: RoomSummary[]) => {
       setPublicRooms(rooms || []);
     });
 
     socket.on('room:state', (snapshot: GameSnapshot) => {
-      // Trigger sound effects on new explosions, wave transitions, or match completion
+      if (localDevArenaRef.current) return; // Ignore if in solo local dev mode
+
       if (rendererRef.current && snapshot.explosions?.length) {
         for (const exp of snapshot.explosions) {
           rendererRef.current.spawnExplosionParticles(exp, reducedEffects);
@@ -224,7 +222,6 @@ export default function App() {
         prevStatusRef.current === 'PLAYING'
       ) {
         soundEngine.playMatchEnd(snapshot.status === 'VICTORY');
-        // Refresh profile & leaderboard after match
         socket.emit(
           'profile:sync',
           { pilotId },
@@ -240,7 +237,6 @@ export default function App() {
       setRoomSnapshot(snapshot);
     });
 
-    // Latency ping check
     const pingTimer = setInterval(() => {
       if (socket.connected) {
         const start = performance.now();
@@ -254,9 +250,9 @@ export default function App() {
       clearInterval(pingTimer);
       socket.disconnect();
     };
-  }, [pilotId]);
+  }, [pilotId, configuredEnvBackendUrl]);
 
-  // Keyboard & Mouse Controls during Active Gameplay
+  // Keyboard & Mouse Controls during Active Gameplay (Both Multiplayer & Solo Dev Mode)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const snap = roomSnapshotRef.current;
@@ -281,7 +277,6 @@ export default function App() {
         soundEngine.playBoost();
       }
 
-      // If player is moving with keyboard and hasn't aimed with mouse recently, face movement direction
       if (mouseAngleRef.current === null) {
         const dx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
         const dy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
@@ -304,15 +299,18 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
-    // Emit input state to server at 30Hz while in a playing room
     const inputInterval = setInterval(() => {
       const snap = roomSnapshotRef.current;
-      const socket = socketRef.current;
-      if (!snap || snap.status !== 'PLAYING' || !socket || !socket.connected) return;
+      if (!snap || snap.status !== 'PLAYING') return;
 
       const inp = inputStateRef.current;
       inp.seq += 1;
-      socket.emit('player:input', inp);
+
+      if (localDevArenaRef.current) {
+        localDevArenaRef.current.input = { ...inp };
+      } else if (socketRef.current && socketRef.current.connected) {
+        socketRef.current.emit('player:input', inp);
+      }
 
       if (inp.shoot) {
         const me = snap.players.find((p) => p.pilotId === pilotId);
@@ -328,6 +326,43 @@ export default function App() {
       clearInterval(inputInterval);
     };
   }, [pilotId]);
+
+  // Local Solo Development Mode 30Hz Simulation Loop (When running without a backend)
+  useEffect(() => {
+    if (!isLocalDevSession || !localDevArenaRef.current) return;
+
+    let lastTick = performance.now();
+    const simTimer = setInterval(() => {
+      const now = performance.now();
+      const dt = Math.min(0.1, (now - lastTick) / 1000);
+      lastTick = now;
+
+      const arena = localDevArenaRef.current;
+      if (!arena) return;
+
+      if (!isPaused && arena.status === 'PLAYING') {
+        arena.update(dt);
+      }
+      const snapshot = arena.consumeSnapshot();
+
+      if (rendererRef.current && snapshot.explosions?.length) {
+        for (const exp of snapshot.explosions) {
+          rendererRef.current.spawnExplosionParticles(exp, reducedEffects);
+          soundEngine.playExplosion(exp.intensity);
+        }
+      }
+
+      if (snapshot.status === 'PLAYING' && snapshot.wave !== prevWaveRef.current) {
+        prevWaveRef.current = snapshot.wave;
+        soundEngine.playWaveAlert(snapshot.wave % 5 === 0 || snapshot.wave === 3);
+      }
+
+      roomSnapshotRef.current = snapshot;
+      setRoomSnapshot(snapshot);
+    }, 1000 / 30);
+
+    return () => clearInterval(simTimer);
+  }, [isLocalDevSession, isPaused, reducedEffects]);
 
   // 60 FPS Canvas Render Loop when in Game Arena
   useEffect(() => {
@@ -382,9 +417,31 @@ export default function App() {
   }, [roomSnapshot?.status, pilotId, reducedEffects]);
 
   // Actions
+  const handleStartSoloDevMode = () => {
+    setErrorBanner(null);
+    const devArena = new LocalDevArena(
+      pilotId,
+      username,
+      selectedShip,
+      selectedColor,
+      profile?.level || 1
+    );
+    localDevArenaRef.current = devArena;
+    setIsLocalDevSession(true);
+    setIsPaused(false);
+    const snap = devArena.consumeSnapshot();
+    roomSnapshotRef.current = snap;
+    setRoomSnapshot(snap);
+  };
+
   const handleQuickPlay = (mode: GameMode = 'COOP_SURVIVAL') => {
     const socket = socketRef.current;
-    if (!socket) return;
+    if (!socket || !connected) {
+      setErrorBanner(
+        'Multiplayer backend is not connected yet. Deploy the /backend server and set VITE_BACKEND_URL, or click "Solo Dev Mode (No Backend)" to test gameplay locally.'
+      );
+      return;
+    }
     setErrorBanner(null);
     socket.emit(
       'room:quickplay',
@@ -406,7 +463,13 @@ export default function App() {
   const handleCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
     const socket = socketRef.current;
-    if (!socket) return;
+    if (!socket || !connected) {
+      setShowCreateModal(false);
+      setErrorBanner(
+        'Cannot create a multiplayer room while the Socket.IO backend is offline. Configure VITE_BACKEND_URL or use Solo Dev Mode.'
+      );
+      return;
+    }
     setErrorBanner(null);
     socket.emit(
       'room:create',
@@ -432,7 +495,12 @@ export default function App() {
 
   const handleJoinRoomByCode = (codeToJoin: string) => {
     const socket = socketRef.current;
-    if (!socket) return;
+    if (!socket || !connected) {
+      setErrorBanner(
+        'Multiplayer backend is offline. Deploy /backend and configure VITE_BACKEND_URL to join multiplayer rooms.'
+      );
+      return;
+    }
     const clean = codeToJoin.trim().toUpperCase();
     if (!clean) {
       setErrorBanner('Enter a valid 6-character room code.');
@@ -457,9 +525,11 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
-    const socket = socketRef.current;
-    if (socket) {
-      socket.emit('room:leave');
+    if (localDevArenaRef.current) {
+      localDevArenaRef.current = null;
+      setIsLocalDevSession(false);
+    } else if (socketRef.current) {
+      socketRef.current.emit('room:leave');
     }
     setRoomSnapshot(null);
     roomSnapshotRef.current = null;
@@ -467,6 +537,11 @@ export default function App() {
   };
 
   const handleStartMatch = () => {
+    if (localDevArenaRef.current) {
+      localDevArenaRef.current.restart();
+      setIsPaused(false);
+      return;
+    }
     const socket = socketRef.current;
     if (socket) {
       socket.emit('game:start');
@@ -484,7 +559,7 @@ export default function App() {
     if (color) setSelectedColor(color);
     if (newUsername !== undefined) setUsername(newUsername);
     const socket = socketRef.current;
-    if (socket) {
+    if (socket && connected) {
       socket.emit('player:customize', {
         shipType: shipType || selectedShip,
         color: color || selectedColor,
@@ -546,10 +621,9 @@ export default function App() {
           }
         }}
       >
-        {/* Main Battlefield Canvas */}
         <canvas ref={arenaCanvasRef} className="block w-full h-full" />
 
-        {/* TOP-LEFT HUD: Ship Telemetry (Hull, Shield, Boost, Lives) */}
+        {/* TOP-LEFT HUD: Ship Telemetry */}
         {localPlayer && (
           <div className="pointer-events-none absolute top-4 left-4 w-72 bg-slate-950/85 border border-slate-800/90 rounded-xl p-4 backdrop-blur-md">
             <div className="flex items-center justify-between mb-2">
@@ -561,7 +635,6 @@ export default function App() {
               </span>
             </div>
 
-            {/* Hull Bar */}
             <div className="mb-2.5">
               <div className="flex justify-between text-xs font-mono tabular-nums mb-1">
                 <span className="text-slate-300">HULL INTEGRITY</span>
@@ -579,7 +652,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Shield Bar */}
             <div className="mb-2.5">
               <div className="flex justify-between text-xs font-mono tabular-nums mb-1">
                 <span className="text-slate-300">HARMONIC SHIELD</span>
@@ -597,7 +669,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Boost Capacitor */}
             <div className="mb-3">
               <div className="flex justify-between text-xs font-mono tabular-nums mb-1">
                 <span className="text-slate-300">AFTERBURNER BOOST</span>
@@ -613,7 +684,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Lives & Score Footer */}
             <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-xs font-mono tabular-nums text-slate-300">
               <span>
                 {roomSnapshot.mode === 'COOP_SURVIVAL'
@@ -639,9 +709,11 @@ export default function App() {
             <div>
               <span className="text-slate-400 block text-[10px]">SECTOR MODE</span>
               <span className="text-white font-semibold">
-                {roomSnapshot.mode === 'COOP_SURVIVAL'
-                  ? `WAVE ${roomSnapshot.wave} / ${roomSnapshot.maxWaves}`
-                  : 'FREE-FOR-ALL'}
+                {isLocalDevSession
+                  ? `SOLO DEV · WAVE ${roomSnapshot.wave}`
+                  : roomSnapshot.mode === 'COOP_SURVIVAL'
+                    ? `WAVE ${roomSnapshot.wave} / ${roomSnapshot.maxWaves}`
+                    : 'FREE-FOR-ALL'}
               </span>
             </div>
             <span className="text-slate-700">·</span>
@@ -664,14 +736,13 @@ export default function App() {
             </div>
             <span className="text-slate-700">·</span>
             <div>
-              <span className="text-slate-400 block text-[10px]">SQUAD SCORE</span>
+              <span className="text-slate-400 block text-[10px]">TOTAL SCORE</span>
               <span className="text-emerald-400 font-semibold">
                 {roomSnapshot.teamScore.toLocaleString()}
               </span>
             </div>
           </div>
 
-          {/* Multi-Phase Boss Health Bar */}
           {activeBoss && (
             <div className="w-full bg-slate-950/90 border border-rose-500/60 rounded-xl p-3 backdrop-blur-md">
               <div className="flex items-center justify-between text-xs font-mono tabular-nums mb-1.5">
@@ -698,9 +769,11 @@ export default function App() {
         <div className="pointer-events-none absolute top-4 right-4 w-72 flex flex-col gap-3">
           <div className="bg-slate-950/85 border border-slate-800/90 rounded-xl p-3.5 backdrop-blur-md">
             <div className="flex items-center justify-between text-xs text-slate-400 font-mono tabular-nums mb-2 pb-1.5 border-b border-slate-800">
-              <span>ROOM {roomSnapshot.roomCode}</span>
+              <span>{isLocalDevSession ? 'LOCAL DEV ENGINE' : `ROOM ${roomSnapshot.roomCode}`}</span>
               <span>
-                {connected ? 'ONLINE' : 'RECONNECTING'} · {pingMs}ms
+                {isLocalDevSession
+                  ? '1 PILOT (OFFLINE)'
+                  : `${connected ? 'ONLINE' : 'RECONNECTING'} · ${pingMs}ms`}
               </span>
             </div>
             <div className="space-y-1.5">
@@ -735,7 +808,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Kill Notification Feed */}
           {roomSnapshot.killFeed.length > 0 && (
             <div className="space-y-1">
               {roomSnapshot.killFeed.slice(0, 4).map((kf) => (
@@ -755,7 +827,7 @@ export default function App() {
         </div>
 
         {/* BOTTOM-LEFT HUD: Controls Quick Bar & Pause Trigger */}
-        <div className=" absolute bottom-4 left-4 flex items-center gap-3">
+        <div className="absolute bottom-4 left-4 flex items-center gap-3">
           <button
             onClick={() => setIsPaused(true)}
             className="px-3.5 py-2 bg-slate-950/85 hover:bg-slate-900 border border-slate-800 rounded-lg text-xs font-medium text-slate-200 flex items-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
@@ -788,7 +860,7 @@ export default function App() {
           />
         </div>
 
-        {/* Respawn Countdown Banner if Local Player Destroyed */}
+        {/* Respawn Countdown Banner */}
         {localPlayer && localPlayer.respawnTimer > 0 && roomSnapshot.status === 'PLAYING' && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/45 backdrop-blur-xs">
             <div className="bg-slate-950/90 border border-rose-500/50 rounded-2xl px-8 py-6 text-center max-w-md">
@@ -826,7 +898,9 @@ export default function App() {
                 Tactical Systems Paused
               </h2>
               <p className="text-xs text-slate-400 mb-6 font-mono">
-                Room Code: {roomSnapshot.roomCode} · Real-Time Simulation Active in Background
+                {isLocalDevSession
+                  ? 'Solo Development Mode (Local Engine)'
+                  : `Room Code: ${roomSnapshot.roomCode} · Live Multiplayer Session`}
               </p>
 
               <div className="space-y-4 mb-6">
@@ -834,7 +908,7 @@ export default function App() {
                   <span className="text-sm text-slate-300">Mute Audio</span>
                   <button
                     onClick={() => setMuted(!muted)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-white transition-colors"
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer"
                   >
                     {muted ? 'Unmute' : 'Mute'}
                   </button>
@@ -843,7 +917,7 @@ export default function App() {
                   <span className="text-sm text-slate-300">Reduced Visual Effects</span>
                   <button
                     onClick={() => setReducedEffects(!reducedEffects)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-white transition-colors"
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer"
                   >
                     {reducedEffects ? 'Enabled' : 'Standard'}
                   </button>
@@ -852,7 +926,7 @@ export default function App() {
                   <span className="text-sm text-slate-300">Fullscreen Display</span>
                   <button
                     onClick={toggleFullscreen}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-white transition-colors"
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer"
                   >
                     Toggle Fullscreen
                   </button>
@@ -902,7 +976,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* Match Standings Table */}
               <div className="border border-slate-800 rounded-xl overflow-hidden mb-6">
                 <table className="w-full text-left border-collapse text-sm">
                   <thead>
@@ -993,7 +1066,9 @@ export default function App() {
               setNavTab('ROOMS');
             }}
             className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              navTab === 'ROOMS' && !roomSnapshot ? 'text-cyan-400 underline underline-offset-8' : ''
+              navTab === 'ROOMS' && !roomSnapshot
+                ? 'text-cyan-400 underline underline-offset-8'
+                : ''
             }`}
           >
             Multiplayer Rooms
@@ -1004,7 +1079,9 @@ export default function App() {
               setNavTab('HANGAR');
             }}
             className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              navTab === 'HANGAR' && !roomSnapshot ? 'text-cyan-400 underline underline-offset-8' : ''
+              navTab === 'HANGAR' && !roomSnapshot
+                ? 'text-cyan-400 underline underline-offset-8'
+                : ''
             }`}
           >
             Ship Hangar
@@ -1033,7 +1110,7 @@ export default function App() {
                 : ''
             }`}
           >
-            How to Play
+            Deploy & Guide
           </button>
         </nav>
 
@@ -1063,18 +1140,18 @@ export default function App() {
           Ranks
         </button>
         <button onClick={() => setNavTab('HOW_TO_PLAY')} className="py-1 whitespace-nowrap">
-          Guide
+          Deploy
         </button>
       </div>
 
       {/* Error Alert Banner */}
       {errorBanner && (
         <div className="max-w-6xl mx-auto w-full px-6 pt-4">
-          <div className="bg-rose-950/70 border border-rose-500/50 rounded-xl px-4 py-3 text-sm text-rose-200 flex items-center justify-between">
+          <div className="bg-rose-950/70 border border-rose-500/50 rounded-xl px-4 py-3 text-sm text-rose-200 flex items-center justify-between gap-4">
             <span>{errorBanner}</span>
             <button
               onClick={() => setErrorBanner(null)}
-              className="text-xs font-mono text-rose-300 hover:text-white"
+              className="text-xs font-mono text-rose-300 hover:text-white shrink-0 cursor-pointer"
             >
               Dismiss
             </button>
@@ -1110,7 +1187,11 @@ export default function App() {
                   onClick={() => handleCopyRoomCode(roomSnapshot.roomCode)}
                   className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
-                  {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedCode ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
                   {copiedCode ? 'Copied' : 'Copy Code'}
                 </button>
               </div>
@@ -1126,7 +1207,6 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 pt-8">
-            {/* Connected Squadron Roster (Left 7 Columns) */}
             <div className="lg:col-span-7 space-y-6">
               <div className="flex items-center justify-between">
                 <h2 className="font-display text-xl font-bold text-white">
@@ -1185,7 +1265,6 @@ export default function App() {
                 </table>
               </div>
 
-              {/* Launch / Ready Controls */}
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
                 <div>
                   <h3 className="font-display font-semibold text-white text-base">
@@ -1215,7 +1294,9 @@ export default function App() {
                   }
                   return (
                     <button
-                      onClick={() => handleLobbyCustomize(undefined, undefined, undefined, !me?.isReady)}
+                      onClick={() =>
+                        handleLobbyCustomize(undefined, undefined, undefined, !me?.isReady)
+                      }
                       className={`px-6 py-3 font-semibold text-sm rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         me?.isReady
                           ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
@@ -1229,7 +1310,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Instant Ship & Color Loadout Customizer (Right 5 Columns) */}
             <div className="lg:col-span-5 bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-6">
               <div className="flex items-center justify-between">
                 <h2 className="font-display text-lg font-bold text-white">Your Ship Loadout</h2>
@@ -1303,13 +1383,17 @@ export default function App() {
                 <div className="lg:col-span-7 flex flex-col justify-between bg-slate-900/40 border border-slate-800/90 rounded-2xl p-8">
                   <div>
                     <div className="text-xs font-mono text-cyan-400 mb-3">
-                      SERVER-AUTHORITATIVE MULTIPLAYER SPACE COMBAT · {connected ? `CONNECTED (${pingMs}ms)` : 'CONNECTING'}
+                      {connected
+                        ? `MULTIPLAYER BACKEND ONLINE (${pingMs}ms) · ${
+                            configuredEnvBackendUrl || 'SAME-ORIGIN DEV SERVER'
+                          }`
+                        : 'MULTIPLAYER BACKEND OFFLINE · SOLO DEV MODE READY'}
                     </div>
                     <h1 className="font-display text-4xl sm:text-5xl font-bold text-white tracking-tight mb-4">
                       Command the Sector. Survive the Swarm.
                     </h1>
                     <p className="text-slate-300 text-base leading-relaxed max-w-xl mb-8">
-                      Pilot high-velocity starfighters with 2–8 real players in synchronized WebSocket arenas. Coordinate against escalating AI waves and multi-phase dreadnought bosses, or battle rivals in Free-For-All combat.
+                      Pilot high-velocity starfighters with 2–8 real players in synchronized WebSocket arenas. Coordinate against escalating AI waves and multi-phase dreadnought bosses, or test your ship locally in Solo Dev Mode when running without a backend.
                     </p>
                   </div>
 
@@ -1318,22 +1402,28 @@ export default function App() {
                     <div className="flex flex-wrap items-center gap-3">
                       <button
                         onClick={() => handleQuickPlay('COOP_SURVIVAL')}
-                        className="px-6 py-3.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-sm rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                        className="px-5 py-3.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-sm rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Play className="w-4 h-4 fill-current" />
-                        Play Co-Op Survival
+                        Play Online (Co-Op)
                       </button>
                       <button
                         onClick={() => handleQuickPlay('FREE_FOR_ALL')}
-                        className="px-5 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-xl border border-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="px-4 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-xl border border-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         Play Free-For-All
                       </button>
                       <button
                         onClick={() => setShowCreateModal(true)}
-                        className="px-5 py-3.5 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-sm rounded-xl border border-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="px-4 py-3.5 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-sm rounded-xl border border-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         Create Room
+                      </button>
+                      <button
+                        onClick={handleStartSoloDevMode}
+                        className="px-4 py-3.5 bg-slate-950 hover:bg-slate-900 text-amber-300 font-medium text-sm rounded-xl border border-amber-500/40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Solo Dev Mode (No Backend)
                       </button>
                     </div>
 
@@ -1353,6 +1443,12 @@ export default function App() {
                       >
                         Join Room by Code
                       </button>
+                      <button
+                        onClick={() => setNavTab('HOW_TO_PLAY')}
+                        className="text-xs font-mono text-slate-400 hover:text-cyan-400 transition-colors sm:ml-auto whitespace-nowrap cursor-pointer"
+                      >
+                        Deploying on Vercel? Read Setup Guide →
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1371,13 +1467,10 @@ export default function App() {
                         <span className="text-xs text-cyan-400 block">
                           LEVEL {profile?.level || 1}
                         </span>
-                        <span className="text-xs text-slate-400">
-                          {profile?.xp || 0} XP
-                        </span>
+                        <span className="text-xs text-slate-400">{profile?.xp || 0} XP</span>
                       </div>
                     </div>
 
-                    {/* Callsign Quick Edit */}
                     <div className="mb-5">
                       <label className="block text-[11px] font-mono text-slate-400 mb-1">
                         PILOT CALLSIGN
@@ -1426,7 +1519,9 @@ export default function App() {
                       Live Multiplayer Sectors
                     </h2>
                     <p className="text-xs text-slate-400">
-                      Real-time rooms hosted on the shared Socket.IO game server
+                      {connected
+                        ? 'Real-time rooms hosted on the connected Socket.IO game server'
+                        : 'Multiplayer server not connected — configure VITE_BACKEND_URL or use Solo Dev Mode'}
                     </p>
                   </div>
                   <button
@@ -1441,17 +1536,32 @@ export default function App() {
                 {publicRooms.length === 0 ? (
                   <div className="bg-slate-900/30 border border-slate-800/80 rounded-2xl p-8 text-center">
                     <p className="text-sm text-slate-300 mb-1">
-                      No public sectors currently active.
+                      {connected
+                        ? 'No public sectors currently active.'
+                        : 'Socket.IO Multiplayer Backend is not connected yet.'}
                     </p>
                     <p className="text-xs text-slate-400 mb-4">
-                      Create a room or click Play Co-Op Survival to launch a new sector immediately.
+                      {connected
+                        ? 'Create a room or click Play Online to launch a new multiplayer sector.'
+                        : 'You can play Solo Dev Mode right now without a backend, or deploy /backend and set VITE_BACKEND_URL.'}
                     </p>
-                    <button
-                      onClick={() => setShowCreateModal(true)}
-                      className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs rounded-lg transition-colors cursor-pointer"
-                    >
-                      Create First Public Room
-                    </button>
+                    <div className="flex items-center justify-center gap-3">
+                      {connected ? (
+                        <button
+                          onClick={() => setShowCreateModal(true)}
+                          className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs rounded-lg transition-colors cursor-pointer"
+                        >
+                          Create First Public Room
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handleStartSoloDevMode}
+                          className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-semibold text-xs rounded-lg transition-colors cursor-pointer"
+                        >
+                          Launch Solo Dev Mode (Single-Player)
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1562,7 +1672,9 @@ export default function App() {
                     {publicRooms.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="py-10 text-center text-slate-400">
-                          No public rooms active right now. Click "Create New Room" above to host one!
+                          {connected
+                            ? 'No public rooms active right now. Click "Create New Room" above to host one!'
+                            : 'Multiplayer Backend Offline. Deploy /backend and set VITE_BACKEND_URL to enable live rooms.'}
                         </td>
                       </tr>
                     ) : (
@@ -1619,7 +1731,6 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-                {/* 4 Ship Classes Grid (Left 7 Columns) */}
                 <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {(Object.keys(SHIP_SPECS) as ShipType[]).map((type) => {
                     const spec = SHIP_SPECS[type];
@@ -1637,7 +1748,9 @@ export default function App() {
                         <div>
                           <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-1">
                             <span>{spec.role}</span>
-                            {isSelected && <span className="text-cyan-400 font-semibold">EQUIPPED</span>}
+                            {isSelected && (
+                              <span className="text-cyan-400 font-semibold">EQUIPPED</span>
+                            )}
                           </div>
                           <h3 className="font-display text-xl font-bold text-white mb-2">
                             {spec.name}
@@ -1665,7 +1778,9 @@ export default function App() {
                           </div>
                           <div className="flex justify-between">
                             <span className="text-slate-400">WEAPON SYSTEM</span>
-                            <span className="text-amber-300 uppercase">{spec.projectilePattern}</span>
+                            <span className="text-amber-300 uppercase">
+                              {spec.projectilePattern}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -1673,7 +1788,6 @@ export default function App() {
                   })}
                 </div>
 
-                {/* Customization & Career Record (Right 5 Columns) */}
                 <div className="lg:col-span-5 space-y-6">
                   <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-5">
                     <h2 className="font-display text-xl font-bold text-white">
@@ -1719,7 +1833,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Career Combat Telemetry */}
                   <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
                     <h2 className="font-display text-xl font-bold text-white">
                       Career Service Record
@@ -1771,7 +1884,6 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* Interactive Filter Controls */}
                 <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl">
                   <button
                     onClick={() => setLeaderboardFilter('ALL')}
@@ -1853,17 +1965,51 @@ export default function App() {
           )}
 
           {/* ================================================================ */}
-          {/* HOW TO PLAY & MULTIPLAYER TESTING BRIEFING TAB                   */}
+          {/* DEPLOYMENT (VERCEL + BACKEND) & HOW TO PLAY GUIDE                */}
           {/* ================================================================ */}
           {navTab === 'HOW_TO_PLAY' && (
             <div className="space-y-8">
               <div className="pb-6 border-b border-slate-800">
                 <h1 className="font-display text-3xl font-bold text-white">
-                  Pilot Operations Manual & Multiplayer Guide
+                  Vercel Deployment, Backend Setup & Operations Manual
                 </h1>
                 <p className="text-sm text-slate-400 mt-1">
-                  Master starfighter flight controls, enemy AI behavior, and real-time multi-client testing.
+                  How to deploy the frontend to Vercel, deploy the standalone Node.js + Socket.IO `/backend` server, and configure `VITE_BACKEND_URL`.
                 </p>
+              </div>
+
+              {/* Vercel + Standalone Backend Architecture Guide */}
+              <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="font-display text-xl font-bold text-white flex items-center gap-2">
+                    <Server className="w-5 h-5 text-cyan-400" />
+                    Deploying Frontend on Vercel + Multiplayer Backend
+                  </h2>
+                  <span className="text-xs font-mono text-cyan-400">
+                    VITE_BACKEND_URL: {configuredEnvBackendUrl || '(Not Set — Dev Mode)'}
+                  </span>
+                </div>
+                <p className="text-sm text-slate-300 leading-relaxed">
+                  Because Vercel hosts static frontends and stateless serverless functions (which do not keep persistent WebSocket game rooms alive in memory), <strong>SPACE ARENA</strong> separates the project into two clean parts:
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2">
+                    <h3 className="font-display font-bold text-white text-sm">
+                      Step 1: Deploy Frontend on Vercel (Works Immediately)
+                    </h3>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Import the repository root into <strong>Vercel</strong>. The included <code>vercel.json</code> automatically builds the Vite React SPA (<code>npm run build</code> → <code>dist</code>). Even before setting <code>VITE_BACKEND_URL</code>, you can play <strong>Solo Dev Mode (No Backend)</strong> on your Vercel URL.
+                    </p>
+                  </div>
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2">
+                    <h3 className="font-display font-bold text-white text-sm">
+                      Step 2: Deploy the `/backend` Folder & Set `VITE_BACKEND_URL`
+                    </h3>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Deploy the standalone <code>/backend</code> folder to <strong>Render</strong>, <strong>Railway</strong>, <strong>Fly.io</strong>, or <strong>Google Cloud Run</strong> (Root Directory: <code>backend</code>, Build: <code>npm install && npm run build</code>, Start: <code>npm start</code>). Then add <code>VITE_BACKEND_URL=https://your-backend-url.com</code> in <strong>Vercel → Project Settings → Environment Variables</strong> and redeploy.
+                    </p>
+                  </div>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1882,7 +2028,7 @@ export default function App() {
                       <strong className="text-white font-mono">Spacebar or Left Click:</strong> Fire primary weapon array.
                     </li>
                     <li>
-                      <strong className="text-white font-mono">Shift:</strong> Engage Afterburner Boost (consumes Boost capacitor energy, regenerates automatically).
+                      <strong className="text-white font-mono">Shift:</strong> Engage Afterburner Boost (drains Boost energy, auto-recharges).
                     </li>
                     <li>
                       <strong className="text-white font-mono">Escape:</strong> Open tactical pause & settings overlay.
@@ -1896,10 +2042,10 @@ export default function App() {
                   </h2>
                   <ol className="space-y-2.5 text-sm text-slate-300 list-decimal list-inside">
                     <li>
-                      Open this application URL in <strong>two separate browser windows</strong> side-by-side.
+                      Open the application URL in <strong>two separate browser windows or tabs</strong> side-by-side.
                     </li>
                     <li>
-                      In Window 1, click <strong>Create Room</strong> (or <strong>Play Co-Op Survival</strong>) and copy the 6-character Room Code shown in the lobby.
+                      In Window 1, click <strong>Create Room</strong> (or <strong>Play Online</strong>) and copy the 6-character Room Code shown in the lobby.
                     </li>
                     <li>
                       In Window 2, paste the Room Code on the Command Center or select the room in <strong>Multiplayer Rooms</strong>.
@@ -1908,46 +2054,6 @@ export default function App() {
                       Both pilots appear live in the lobby. Click <strong>Launch Match Now</strong> on the host window to fight side-by-side or head-to-head!
                     </li>
                   </ol>
-                </div>
-
-                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 space-y-4">
-                  <h2 className="font-display text-xl font-bold text-white">
-                    03. Hostile Threat Matrix
-                  </h2>
-                  <div className="space-y-2 text-sm text-slate-300">
-                    <p>
-                      <strong className="text-sky-400">Dart Scout:</strong> High-speed flanking interceptor that weaves around incoming fire.
-                    </p>
-                    <p>
-                      <strong className="text-amber-400">Viper Stalker:</strong> Locks onto the closest pilot and relentlessly pursues.
-                    </p>
-                    <p>
-                      <strong className="text-purple-400">Pulse Marksman:</strong> Maintains standoff distance while strafing and firing aimed bolts.
-                    </p>
-                    <p>
-                      <strong className="text-rose-400">Goliath Enforcer & Volatile Drone:</strong> Heavy dual-cannon armor and high-speed kamikaze detonation drones.
-                    </p>
-                    <p>
-                      <strong className="text-rose-500">Multi-Phase Dreadnought Bosses:</strong> Appear on Waves 3, 5, and 10 with 3 distinct attack phases and reinforcement spawns.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 space-y-4">
-                  <h2 className="font-display text-xl font-bold text-white">
-                    04. Shields, Power-Ups & Respawns
-                  </h2>
-                  <div className="space-y-2 text-sm text-slate-300">
-                    <p>
-                      Your <strong>Harmonic Shield</strong> absorbs incoming damage first and automatically recharges after 3.5 seconds out of combat.
-                    </p>
-                    <p>
-                      Destroying enemies and asteroids drops <strong>+HULL</strong>, <strong>+SHLD</strong>, <strong>OVERDRIVE</strong> (rapid fire), and <strong>+BOOST</strong> cells.
-                    </p>
-                    <p>
-                      In <strong>Co-Op Survival</strong>, each pilot has 3 lives with a 3.5-second reconstruction timer. As long as one pilot survives, the squadron stays in the fight!
-                    </p>
-                  </div>
                 </div>
               </div>
             </div>
@@ -2122,7 +2228,11 @@ export default function App() {
                   onClick={() => setMuted(!muted)}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-medium text-white flex items-center gap-2 cursor-pointer"
                 >
-                  {muted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-cyan-400" />}
+                  {muted ? (
+                    <VolumeX className="w-4 h-4 text-rose-400" />
+                  ) : (
+                    <Volume2 className="w-4 h-4 text-cyan-400" />
+                  )}
                   {muted ? 'Audio Muted' : 'Audio Active'}
                 </button>
               </div>
@@ -2146,6 +2256,15 @@ export default function App() {
                   <Maximize2 className="w-3.5 h-3.5" />
                   Toggle Fullscreen
                 </button>
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 text-xs font-mono text-slate-400 space-y-1">
+                <div>
+                  VITE_BACKEND_URL: {configuredEnvBackendUrl || '(Not set — uses same-origin / dev)'}
+                </div>
+                <div>
+                  SOCKET STATUS: {connected ? `Connected (${pingMs}ms)` : 'Offline (Solo Dev Mode Ready)'}
+                </div>
               </div>
             </div>
 

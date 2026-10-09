@@ -1,64 +1,79 @@
 # SPACE ARENA — Real-Time Multiplayer Space Shooter
 
-SPACE ARENA is a real-time multiplayer 2D space combat game built with **React**, **TypeScript**, **HTML5 Canvas**, **Node.js**, **Express**, and **Socket.IO**. It supports 2–8 concurrent browser players per room with a server-authoritative 30Hz physics, collision, wave spawning, and enemy AI simulation.
+SPACE ARENA is a real-time multiplayer 2D space shooter built with **React**, **TypeScript**, **HTML5 Canvas**, **Node.js**, **Express**, and **Socket.IO**.
+
+The project is structured so you can:
+1. **Run the Frontend on Vercel** (with `vercel.json` included) and play **Solo Dev Mode** even before deploying a multiplayer backend.
+2. **Deploy the Standalone Node.js + Socket.IO Backend** (`/backend` folder) to any persistent WebSocket host (Render, Railway, Fly.io, or Google Cloud Run) and connect it to your Vercel frontend via the `VITE_BACKEND_URL` environment variable.
+3. **Run Both Together Locally** on port `3000` using `npm run dev`.
 
 ---
 
-## Features
+## Project Structure
 
-1. **Real-Time Socket.IO Multiplayer Architecture**:
-   - Server-authoritative simulation (`src/server/gameEngine.ts` + `server.ts`) validating movement, boost energy, weapon cooldowns, projectile collisions, and scoring.
-   - Isolated room state supporting Public and Private rooms with unique 6-character codes.
-   - Automatic reconnection support, host migration on disconnect, and client-side entity interpolation for smooth 60 FPS rendering.
-2. **Two Game Modes**:
-   - **Co-Op Survival**: Players team up across 10 escalating enemy waves and multi-phase boss fights (`Aegis Cruiser`, `Overlord MK-IX`, `Void Leviathan`).
-   - **Free-For-All**: Competitive player-versus-player arena combat with server-validated PvP damage and neutral bounty targets.
-3. **Four Playable Starfighter Classes**:
-   - **Vanguard MK-IV**: Balanced interceptor with twin pulse cannons.
-   - **Phantom X-9**: High-velocity recon fighter with rapid needle blasters.
-   - **Titan Bastion**: Heavy dreadnought with triple-arc plasma scatter cannons.
-   - **Nova Singularity**: Energy specialist firing piercing photon lances with rapid harmonic shield regeneration.
-4. **Server-Controlled Enemy AI**:
-   - **Dart Scout** (weaving flanker), **Viper Stalker** (player chaser), **Pulse Marksman** (standoff ranged sniper), **Goliath Enforcer** (heavy dual-cannon armor), **Volatile Drone** (exploding kamikaze), and **Multi-Phase Bosses**.
+- `/` (Root): React + TypeScript + Vite Frontend application (`src/`), `vercel.json` for Vercel deployment, and local full-stack dev server (`server.ts`).
+- `/backend`: Standalone, deployable Node.js + TypeScript + Socket.IO multiplayer backend (`backend/package.json`, `backend/tsconfig.json`, `backend/Dockerfile`, `backend/src/server.ts`, `backend/src/gameEngine.ts`).
 
 ---
 
-## Development & Installation
+## How to Deploy Using Vercel + Standalone Multiplayer Backend
 
+> **Why a separate backend for Vercel?**  
+> Vercel is designed for static frontends and stateless serverless functions, which terminate after each request and do not maintain persistent in-memory WebSocket connections or 30Hz game loops. Therefore, the **Frontend** deploys to **Vercel**, and the **`/backend`** folder deploys to a persistent Node.js host.
+
+### Step 1: Deploy the Frontend to Vercel (Works Immediately without Backend)
+
+1. Push this project to a GitHub/GitLab/Bitbucket repository.
+2. In **Vercel**, click **Add New → Project** and import your repository.
+3. Vercel automatically detects **Vite** and uses the included `vercel.json` (`npm run build`, output directory `dist`).
+4. Click **Deploy**.
+5. Before you configure `VITE_BACKEND_URL`, you can click **"Solo Dev Mode (No Backend)"** on the Command Center to test all 4 ships, enemy waves, multi-phase bosses, HUD, and audio directly on your Vercel URL (with zero fake remote players).
+
+### Step 2: Deploy the Standalone `/backend` Folder
+
+Deploy the `/backend` folder to **Render**, **Railway**, **Fly.io**, or **Google Cloud Run**:
+
+#### Option A: Render or Railway
+1. Create a new **Web Service** connected to your repository.
+2. Set **Root Directory** to `backend`.
+3. Set **Build Command** to:
+   ```bash
+   npm install && npm run build
+   ```
+4. Set **Start Command** to:
+   ```bash
+   npm start
+   ```
+5. Optionally set environment variable `CORS_ORIGIN=https://your-vercel-app.vercel.app` (or `*`).
+6. Copy your deployed backend URL (e.g., `https://space-arena-backend.onrender.com`).
+
+#### Option B: Google Cloud Run (uses `/backend/Dockerfile`)
 ```bash
-# 1. Install dependencies
-npm install
+cd backend
+gcloud run deploy space-arena-backend --source . --allow-unauthenticated --region us-central1
+```
 
-# 2. Start the full-stack server (Express + Socket.IO + Vite on port 3000)
+### Step 3: Connect Vercel to Your Deployed Backend (`VITE_BACKEND_URL`)
+
+1. Open your **Vercel Dashboard → Project Settings → Environment Variables**.
+2. Add:
+   - **Key**: `VITE_BACKEND_URL`
+   - **Value**: `https://your-deployed-backend-url.example.com` (no trailing slash)
+3. Trigger a **Redeploy** in Vercel so Vite injects `VITE_BACKEND_URL` at build time.
+4. Open your Vercel URL in **two browser windows**, create a room, share the 6-character Room Code, and play real synchronized multiplayer!
+
+---
+
+## Running in Local Development
+
+### 1. Full-Stack Local Dev (Frontend + Socket.IO on Port 3000)
+```bash
+npm install
 npm run dev
 ```
 
----
-
-## How to Test Multiplayer with Two Browser Windows
-
-1. Open the running application URL in **Window A** and **Window B** (two side-by-side browser windows or tabs).
-2. In **Window A**, click **Create Room** (or **Play Co-Op Survival**). Copy the 6-character **Room Code** displayed in the top-right of the lobby.
-3. In **Window B**, enter the 6-character **Room Code** on the Command Center and click **Join Room by Code** (or click **Join** in the live **Multiplayer Rooms** list).
-4. Verify that both pilots appear in the lobby table and can customize their ship class and neon color in real time.
-5. In **Window A** (Host), click **Launch Match Now**. Both browser windows enter the synchronized battlefield simultaneously.
-
----
-
-## Production Build & Deployment
-
+### 2. Frontend-Only Dev Mode (Without a Backend)
 ```bash
-# Build frontend assets into dist/
-npm run build
-
-# Start the production Node.js + Socket.IO server on port 3000
-npm start
+npx vite --port 3000
 ```
-
-### Connecting to a Separate External Backend (Optional)
-
-By default, the frontend connects to the same origin (`window.location.origin`) where `server.ts` hosts both HTTP and WebSocket traffic. If you deploy the backend separately, set `VITE_BACKEND_URL` in your `.env` file:
-
-```env
-VITE_BACKEND_URL="https://your-multiplayer-backend.example.com"
-```
+When running Vite without the backend, click **Solo Dev Mode (No Backend)** on the Command Center to test gameplay locally.
