@@ -249,8 +249,10 @@ export class GameRoom {
   public enemiesToSpawnQueue: EnemyType[] = [];
   public spawnIntervalTimer = 0;
 
-  public matchTimer = 0; // elapsed in COOP, remaining in FFA
+  public matchTimer = 0; // elapsed in COOP, remaining in PvP modes
   public teamScore = 0;
+  public alphaScore = 0;
+  public omegaScore = 0;
   public targetScoreFFA = 2000;
   public winnerName?: string;
 
@@ -280,7 +282,12 @@ export class GameRoom {
     this.roomName = roomName;
     this.mode = mode;
     this.isPublic = isPublic;
-    this.maxPlayers = Math.min(Math.max(2, maxPlayers), MAX_PLAYERS_PER_ROOM);
+    this.maxPlayers =
+      mode === 'DUEL_1V1'
+        ? 2
+        : Math.min(Math.max(2, maxPlayers), MAX_PLAYERS_PER_ROOM);
+    this.targetScoreFFA =
+      mode === 'DUEL_1V1' ? 1500 : mode === 'TEAM_VS_TEAM' ? 3000 : 2000;
     this.storage = storage;
     this.initAsteroids();
   }
@@ -368,13 +375,19 @@ export class GameRoom {
     const pos = this.findSafeSpawnPosition();
     const isFirst = this.players.size === 0 || !Array.from(this.players.values()).some((p) => p.isHost && p.connected);
 
+    // Auto-balance team assignment for TEAM_VS_TEAM or DUEL_1V1
+    const alphaCount = Array.from(this.players.values()).filter((p) => p.connected && p.team === 'ALPHA').length;
+    const omegaCount = Array.from(this.players.values()).filter((p) => p.connected && p.team === 'OMEGA').length;
+    const assignedTeam = alphaCount <= omegaCount ? 'ALPHA' : 'OMEGA';
+
     const player: InternalPlayer = {
       id: pilotId,
       pilotId,
       socketId,
       username: profile.username,
       shipType: spec.id,
-      color: profile.selectedColor,
+      color: this.mode === 'TEAM_VS_TEAM' ? (assignedTeam === 'ALPHA' ? '#00F0FF' : '#F43F5E') : profile.selectedColor,
+      team: assignedTeam,
       isReady: isFirst,
       isHost: isFirst,
       connected: true,
@@ -481,7 +494,8 @@ export class GameRoom {
     shipType?: ShipType,
     color?: string,
     username?: string,
-    isReady?: boolean
+    isReady?: boolean,
+    team?: 'ALPHA' | 'OMEGA'
   ) {
     const pilotId = this.socketToPilot.get(socketId);
     if (!pilotId) return;
@@ -492,7 +506,13 @@ export class GameRoom {
       player.shipType = shipType;
       this.applyShipStats(player, this.status === 'LOBBY');
     }
-    if (color) player.color = color;
+    if (team && (team === 'ALPHA' || team === 'OMEGA')) {
+      player.team = team;
+      if (this.mode === 'TEAM_VS_TEAM') {
+        player.color = team === 'ALPHA' ? '#00F0FF' : '#F43F5E';
+      }
+    }
+    if (color && this.mode !== 'TEAM_VS_TEAM') player.color = color;
     if (username && username.trim()) player.username = username.trim().slice(0, 18);
     if (typeof isReady === 'boolean') player.isReady = isReady;
 
@@ -535,6 +555,8 @@ export class GameRoom {
     this.statsRecordedForMatch = false;
     this.wave = 1;
     this.teamScore = 0;
+    this.alphaScore = 0;
+    this.omegaScore = 0;
     this.winnerName = undefined;
     this.enemies.clear();
     this.projectiles.clear();
@@ -544,12 +566,28 @@ export class GameRoom {
 
     if (this.mode === 'COOP_SURVIVAL') {
       this.matchTimer = 0;
+    } else if (this.mode === 'DUEL_1V1') {
+      this.matchTimer = 180; // 3-minute high-intensity 1v1 duel
     } else {
-      this.matchTimer = 240; // 4 minutes intense FFA match
+      this.matchTimer = 240; // 4 minutes FFA / Team Battle
     }
 
+    let idx = 0;
     for (const player of this.players.values()) {
-      const pos = this.findSafeSpawnPosition();
+      let pos = this.findSafeSpawnPosition();
+      if (this.mode === 'DUEL_1V1') {
+        pos = {
+          x: idx === 0 ? ARENA_WIDTH / 2 - 420 : ARENA_WIDTH / 2 + 420,
+          y: ARENA_HEIGHT / 2,
+        };
+      } else if (this.mode === 'TEAM_VS_TEAM') {
+        pos = {
+          x: player.team === 'ALPHA' ? 650 + Math.random() * 250 : ARENA_WIDTH - 650 - Math.random() * 250,
+          y: ARENA_HEIGHT / 2 + (Math.random() - 0.5) * 500,
+        };
+      }
+      idx += 1;
+
       this.applyShipStats(player, true);
       player.x = pos.x;
       player.y = pos.y;
@@ -569,10 +607,19 @@ export class GameRoom {
 
     if (this.mode === 'COOP_SURVIVAL') {
       this.prepareWave(1);
+    } else if (this.mode === 'DUEL_1V1') {
+      this.waveTitle = '1 VS 1 DUEL — FIRST TO 5 ELIMINATIONS';
+      this.waveBannerTimer = 3.5;
+      // Spawn tactical center powerups for 1v1 duelists
+      this.spawnPowerUp(ARENA_WIDTH / 2, ARENA_HEIGHT / 2 - 180);
+      this.spawnPowerUp(ARENA_WIDTH / 2, ARENA_HEIGHT / 2 + 180);
+    } else if (this.mode === 'TEAM_VS_TEAM') {
+      this.waveTitle = 'TEAM BATTLE — ALPHA SQUAD VS OMEGA SQUAD';
+      this.waveBannerTimer = 3.5;
+      this.spawnPowerUp(ARENA_WIDTH / 2, ARENA_HEIGHT / 2);
     } else {
       this.waveTitle = 'FREE-FOR-ALL ARENA COMBAT';
       this.waveBannerTimer = 3.5;
-      // Spawn neutral bounty patrol drones in FFA to keep combat dynamic
       this.enemiesToSpawnQueue = ['scout', 'scout', 'ranged', 'heavy'];
     }
   }
@@ -1238,13 +1285,22 @@ export class GameRoom {
           continue;
         }
 
-        // In FREE_FOR_ALL mode, check PvP collision against other players!
-        if (this.mode === 'FREE_FOR_ALL') {
+        // In PvP modes (FREE_FOR_ALL, DUEL_1V1, TEAM_VS_TEAM), check collision against rival players!
+        if (this.mode !== 'COOP_SURVIVAL') {
           for (const targetPlayer of this.players.values()) {
             if (
               !targetPlayer.connected ||
               targetPlayer.id === proj.ownerId ||
               targetPlayer.respawnTimer > 0
+            ) {
+              continue;
+            }
+            // Friendly-fire protection in TEAM_VS_TEAM
+            if (
+              this.mode === 'TEAM_VS_TEAM' &&
+              shooter &&
+              shooter.team &&
+              shooter.team === targetPlayer.team
             ) {
               continue;
             }
@@ -1301,6 +1357,10 @@ export class GameRoom {
       if (attackerPlayer && attackerPlayer.id !== victim.id) {
         attackerPlayer.kills += 1;
         attackerPlayer.score += 300;
+        if (this.mode === 'TEAM_VS_TEAM') {
+          if (attackerPlayer.team === 'ALPHA') this.alphaScore += 300;
+          else this.omegaScore += 300;
+        }
         this.addKillFeed(
           attackerPlayer.username,
           attackerPlayer.color,
@@ -1386,8 +1446,12 @@ export class GameRoom {
           this.prepareWave(this.wave + 1);
         }
       }
+    } else if (this.mode === 'TEAM_VS_TEAM') {
+      if (this.alphaScore >= this.targetScoreFFA || this.omegaScore >= this.targetScoreFFA) {
+        this.concludeFFAMatch();
+      }
     } else {
-      // FREE_FOR_ALL victory check
+      // FREE_FOR_ALL or DUEL_1V1 victory check
       const leader = [...connectedPlayers].sort((a, b) => b.score - a.score)[0];
       if (leader && leader.score >= this.targetScoreFFA) {
         this.concludeFFAMatch();
@@ -1398,19 +1462,29 @@ export class GameRoom {
   private concludeFFAMatch() {
     this.status = 'VICTORY';
     const connectedPlayers = Array.from(this.players.values()).filter((p) => p.connected);
+    if (this.mode === 'TEAM_VS_TEAM') {
+      const winningTeam = this.alphaScore >= this.omegaScore ? 'ALPHA' : 'OMEGA';
+      this.winnerName = `${winningTeam} SQUADRON`;
+      this.recordAllPlayerStats(false, undefined, winningTeam);
+      return;
+    }
     const sorted = [...connectedPlayers].sort((a, b) => b.score - a.score);
     const winner = sorted[0];
     this.winnerName = winner ? winner.username : 'ARENA CHAMPION';
     this.recordAllPlayerStats(true, winner?.id);
   }
 
-  private recordAllPlayerStats(coopWon: boolean, ffaWinnerId?: string) {
+  private recordAllPlayerStats(coopWon: boolean, ffaWinnerId?: string, winningTeam?: 'ALPHA' | 'OMEGA') {
     if (this.statsRecordedForMatch) return;
     this.statsRecordedForMatch = true;
 
     for (const p of this.players.values()) {
       const won =
-        this.mode === 'COOP_SURVIVAL' ? coopWon : p.id === ffaWinnerId;
+        this.mode === 'COOP_SURVIVAL'
+          ? coopWon
+          : this.mode === 'TEAM_VS_TEAM'
+            ? p.team === winningTeam
+            : p.id === ffaWinnerId;
       const updated = this.storage.recordMatchResult(
         p.pilotId,
         p.username,
@@ -1499,6 +1573,8 @@ export class GameRoom {
       enemiesRemainingInWave: this.enemies.size + this.enemiesToSpawnQueue.length,
       matchTimer: Math.round(this.matchTimer),
       teamScore: this.teamScore,
+      alphaScore: this.alphaScore,
+      omegaScore: this.omegaScore,
       targetScoreFFA: this.targetScoreFFA,
       winnerName: this.winnerName,
       players: Array.from(this.players.values()).map((p) => ({
@@ -1507,6 +1583,7 @@ export class GameRoom {
         username: p.username,
         shipType: p.shipType,
         color: p.color,
+        team: p.team,
         isReady: p.isReady,
         isHost: p.isHost,
         connected: p.connected,

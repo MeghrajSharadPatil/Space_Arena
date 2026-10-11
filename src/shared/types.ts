@@ -1,6 +1,8 @@
 export type ShipType = 'vanguard' | 'phantom' | 'titan' | 'nova';
 
-export type GameMode = 'COOP_SURVIVAL' | 'FREE_FOR_ALL';
+export type GameMode = 'COOP_SURVIVAL' | 'FREE_FOR_ALL' | 'DUEL_1V1' | 'TEAM_VS_TEAM';
+
+export type TeamId = 'ALPHA' | 'OMEGA';
 
 export type RoomStatus = 'LOBBY' | 'PLAYING' | 'VICTORY' | 'DEFEAT';
 
@@ -83,7 +85,7 @@ export const SHIP_SPECS: Record<ShipType, ShipSpec> = {
     boostDrainRate: 40,
     boostRegenRate: 16,
     fireCooldownMs: 380,
-    damage: 22, // per pellet (3 pellets = 66 total)
+    damage: 22,
     projectileSpeed: 760,
     projectilePattern: 'spread',
     radius: 25,
@@ -121,6 +123,29 @@ export const SHIP_COLORS = [
   { name: 'Nova Amber', hex: '#F59E0B' },
 ];
 
+export const GAME_MODE_LABELS: Record<GameMode, { title: string; short: string; description: string }> = {
+  DUEL_1V1: {
+    title: '1 vs 1 Friend Duel',
+    short: '1v1 Duel',
+    description: 'Head-to-head starfighter duel for 2 players. First pilot to 5 eliminations (or 1,500 score) wins.',
+  },
+  TEAM_VS_TEAM: {
+    title: 'Team Battle (2v2 / 3v3 / 4v4)',
+    short: 'Team PvP',
+    description: 'Alpha Squadron (Cyan) vs Omega Squadron (Crimson). Coordinate with friends to reach 10 team eliminations.',
+  },
+  FREE_FOR_ALL: {
+    title: 'Free-For-All Arena (2–8 Players)',
+    short: 'Free-For-All',
+    description: 'Every pilot for themselves. Compete against up to 8 friends in all-out PvP combat.',
+  },
+  COOP_SURVIVAL: {
+    title: 'Co-Op Wave Survival (1–8 Players)',
+    short: 'Co-Op Survival',
+    description: 'Team up with friends to survive 10 escalating enemy waves and multi-phase dreadnought bosses.',
+  },
+};
+
 export const ARENA_WIDTH = 3000;
 export const ARENA_HEIGHT = 3000;
 export const MAX_PLAYERS_PER_ROOM = 8;
@@ -137,11 +162,12 @@ export interface PlayerInput {
 }
 
 export interface PlayerState {
-  id: string; // socket ID or persistent session ID
+  id: string;
   pilotId: string;
   username: string;
   shipType: ShipType;
   color: string;
+  team?: TeamId;
   isReady: boolean;
   isHost: boolean;
   connected: boolean;
@@ -155,13 +181,13 @@ export interface PlayerState {
   maxHp: number;
   shield: number;
   maxShield: number;
-  boostEnergy: number; // 0-100
+  boostEnergy: number;
   isBoosting: boolean;
   lives: number;
   maxLives: number;
-  respawnTimer: number; // seconds remaining if dead, 0 if alive
-  invulnerableTimer: number; // seconds remaining
-  rapidFireTimer: number; // seconds remaining
+  respawnTimer: number;
+  invulnerableTimer: number;
+  rapidFireTimer: number;
   score: number;
   kills: number;
   deaths: number;
@@ -180,7 +206,7 @@ export interface ProjectileState {
   damage: number;
   color: string;
   radius: number;
-  ttl: number; // seconds
+  ttl: number;
   piercing?: boolean;
 }
 
@@ -211,7 +237,7 @@ export interface AsteroidState {
   radius: number;
   rotation: number;
   rotationSpeed: number;
-  vertices: number[]; // radius multipliers
+  vertices: number[];
   hp: number;
   maxHp: number;
 }
@@ -255,8 +281,10 @@ export interface GameSnapshot {
   waveBannerTimer: number;
   waveTitle: string;
   enemiesRemainingInWave: number;
-  matchTimer: number; // elapsed seconds in Co-Op, remaining seconds in FFA
+  matchTimer: number;
   teamScore: number;
+  alphaScore?: number;
+  omegaScore?: number;
   targetScoreFFA: number;
   winnerName?: string;
   players: PlayerState[];

@@ -119,10 +119,12 @@ io.on('connection', (socket) => {
     ) => {
       leaveCurrentRoom(socket.id);
       const roomCode = generateRoomCode();
-      const mode: GameMode = payload.mode === 'FREE_FOR_ALL' ? 'FREE_FOR_ALL' : 'COOP_SURVIVAL';
+      const validModes: GameMode[] = ['COOP_SURVIVAL', 'FREE_FOR_ALL', 'DUEL_1V1', 'TEAM_VS_TEAM'];
+      const mode: GameMode =
+        payload.mode && validModes.includes(payload.mode) ? payload.mode : 'COOP_SURVIVAL';
       const roomName = (payload.roomName || `${payload.username}'s Sector`).slice(0, 26);
       const isPublic = payload.isPublic !== false;
-      const maxPlayers = payload.maxPlayers || 6;
+      const maxPlayers = mode === 'DUEL_1V1' ? 2 : payload.maxPlayers || 6;
 
       const room = new GameRoom(roomCode, roomName, mode, isPublic, maxPlayers, storage);
       const joinRes = room.addOrReconnectPlayer(
@@ -213,7 +215,15 @@ io.on('connection', (socket) => {
       if (!targetRoom) {
         const code = generateRoomCode();
         const mode: GameMode = payload.preferredMode || 'COOP_SURVIVAL';
-        targetRoom = new GameRoom(code, `Sector ${code.slice(0, 4)}`, mode, true, 8, storage);
+        const defaultMax = mode === 'DUEL_1V1' ? 2 : 8;
+        targetRoom = new GameRoom(
+          code,
+          mode === 'DUEL_1V1' ? `1v1 Duel ${code.slice(0, 4)}` : `Sector ${code.slice(0, 4)}`,
+          mode,
+          true,
+          defaultMax,
+          storage
+        );
         rooms.set(code, targetRoom);
       }
 
@@ -241,7 +251,13 @@ io.on('connection', (socket) => {
 
   socket.on(
     'player:customize',
-    (payload: { shipType?: ShipType; color?: string; username?: string; isReady?: boolean }) => {
+    (payload: {
+      shipType?: ShipType;
+      color?: string;
+      username?: string;
+      isReady?: boolean;
+      team?: 'ALPHA' | 'OMEGA';
+    }) => {
       const roomCode = socketRoomMap.get(socket.id);
       if (!roomCode) return;
       const room = rooms.get(roomCode);
@@ -251,7 +267,8 @@ io.on('connection', (socket) => {
         payload.shipType,
         payload.color,
         payload.username,
-        payload.isReady
+        payload.isReady,
+        payload.team
       );
       io.to(roomCode).emit('room:state', room.consumeSnapshot());
     }

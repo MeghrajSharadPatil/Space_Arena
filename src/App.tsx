@@ -15,6 +15,7 @@ import {
 import {
   ARENA_HEIGHT,
   ARENA_WIDTH,
+  GAME_MODE_LABELS,
   GameMode,
   GameSnapshot,
   LeaderboardEntry,
@@ -24,6 +25,7 @@ import {
   SHIP_COLORS,
   SHIP_SPECS,
   ShipType,
+  TeamId,
 } from './shared/types.ts';
 import { soundEngine } from './client/audio.ts';
 import { ArenaRenderer, renderMinimap } from './client/renderer.ts';
@@ -87,7 +89,14 @@ function getOrCreatePilotId(): string {
 }
 
 export default function App() {
-  const configuredEnvBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
+  const envBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
+  const [customBackendUrl, setCustomBackendUrl] = useState<string>(
+    () => localStorage.getItem('space_arena_custom_backend_url') || ''
+  );
+  const [backendUrlInput, setBackendUrlInput] = useState<string>(
+    () => localStorage.getItem('space_arena_custom_backend_url') || envBackendUrl
+  );
+  const configuredEnvBackendUrl = customBackendUrl.trim() || envBackendUrl;
 
   const [pilotId] = useState<string>(() => getOrCreatePilotId());
   const [username, setUsername] = useState<string>(
@@ -187,6 +196,27 @@ export default function App() {
           if (res?.leaderboard) setLeaderboard(res.leaderboard);
         }
       );
+
+      // Auto-join room if URL contains ?room=CODE
+      const params = new URLSearchParams(window.location.search);
+      const urlRoom = params.get('room')?.trim().toUpperCase();
+      if (urlRoom && !roomSnapshotRef.current) {
+        socket.emit(
+          'room:join',
+          {
+            roomCode: urlRoom,
+            pilotId,
+            username,
+            shipType: selectedShip,
+            color: selectedColor,
+          },
+          (res: { ok: boolean; error?: string }) => {
+            if (!res.ok && res.error) {
+              setErrorBanner(res.error);
+            }
+          }
+        );
+      }
     });
 
     socket.on('disconnect', () => {
@@ -460,6 +490,36 @@ export default function App() {
     );
   };
 
+  const handleHostFriendMode = (mode: GameMode, defaultMaxPlayers: number) => {
+    const socket = socketRef.current;
+    if (!socket || !connected) {
+      setErrorBanner(
+        'Multiplayer backend is not connected yet. Deploy the /backend server and set VITE_BACKEND_URL, or click "Solo Dev Mode (No Backend)" to test gameplay locally.'
+      );
+      return;
+    }
+    setErrorBanner(null);
+    const modeLabel = GAME_MODE_LABELS[mode].short;
+    socket.emit(
+      'room:create',
+      {
+        pilotId,
+        username,
+        shipType: selectedShip,
+        color: selectedColor,
+        roomName: `${username}'s ${modeLabel}`,
+        mode,
+        isPublic: true,
+        maxPlayers: mode === 'DUEL_1V1' ? 2 : defaultMaxPlayers,
+      },
+      (res: { ok: boolean; roomCode?: string; error?: string }) => {
+        if (!res.ok) {
+          setErrorBanner(res.error || 'Failed to create friend match room.');
+        }
+      }
+    );
+  };
+
   const handleCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
     const socket = socketRef.current;
@@ -478,10 +538,10 @@ export default function App() {
         username,
         shipType: selectedShip,
         color: selectedColor,
-        roomName: newRoomName.trim() || `${username}'s Sector`,
+        roomName: newRoomName.trim() || `${username}'s ${GAME_MODE_LABELS[newRoomMode].short}`,
         mode: newRoomMode,
         isPublic: newRoomPublic,
-        maxPlayers: newRoomMaxPlayers,
+        maxPlayers: newRoomMode === 'DUEL_1V1' ? 2 : newRoomMaxPlayers,
       },
       (res: { ok: boolean; roomCode?: string; error?: string }) => {
         if (res.ok) {
@@ -553,7 +613,8 @@ export default function App() {
     shipType?: ShipType,
     color?: string,
     newUsername?: string,
-    isReady?: boolean
+    isReady?: boolean,
+    team?: TeamId
   ) => {
     if (shipType) setSelectedShip(shipType);
     if (color) setSelectedColor(color);
@@ -565,12 +626,16 @@ export default function App() {
         color: color || selectedColor,
         username: newUsername !== undefined ? newUsername : username,
         isReady,
+        team,
       });
     }
   };
 
-  const handleCopyRoomCode = (code: string) => {
-    navigator.clipboard?.writeText(code).catch(() => {});
+  const handleCopyRoomCode = (code: string, asLink = false) => {
+    const textToCopy = asLink
+      ? `${window.location.origin}${window.location.pathname}?room=${code}`
+      : code;
+    navigator.clipboard?.writeText(textToCopy).catch(() => {});
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
   };
@@ -713,7 +778,7 @@ export default function App() {
                   ? `SOLO DEV · WAVE ${roomSnapshot.wave}`
                   : roomSnapshot.mode === 'COOP_SURVIVAL'
                     ? `WAVE ${roomSnapshot.wave} / ${roomSnapshot.maxWaves}`
-                    : 'FREE-FOR-ALL'}
+                    : GAME_MODE_LABELS[roomSnapshot.mode]?.short?.toUpperCase() || 'PVP ARENA'}
               </span>
             </div>
             <span className="text-slate-700">·</span>
@@ -736,9 +801,13 @@ export default function App() {
             </div>
             <span className="text-slate-700">·</span>
             <div>
-              <span className="text-slate-400 block text-[10px]">TOTAL SCORE</span>
+              <span className="text-slate-400 block text-[10px]">
+                {roomSnapshot.mode === 'TEAM_VS_TEAM' ? 'ALPHA vs OMEGA' : 'TOTAL SCORE'}
+              </span>
               <span className="text-emerald-400 font-semibold">
-                {roomSnapshot.teamScore.toLocaleString()}
+                {roomSnapshot.mode === 'TEAM_VS_TEAM'
+                  ? `${roomSnapshot.alphaScore || 0} : ${roomSnapshot.omegaScore || 0}`
+                  : roomSnapshot.teamScore.toLocaleString()}
               </span>
             </div>
           </div>
@@ -959,7 +1028,7 @@ export default function App() {
                 <div className="text-xs font-mono text-slate-400 mb-1">
                   {roomSnapshot.mode === 'COOP_SURVIVAL'
                     ? `SECTOR WAVE ${roomSnapshot.wave}`
-                    : 'FREE-FOR-ALL CHAMPIONSHIP'}
+                    : GAME_MODE_LABELS[roomSnapshot.mode]?.title?.toUpperCase() || 'ARENA CHAMPIONSHIP'}
                 </div>
                 <h2
                   className={`font-display text-4xl font-bold mb-2 ${
@@ -1168,7 +1237,7 @@ export default function App() {
             <div>
               <div className="text-xs font-mono text-slate-400 mb-1">
                 MULTIPLAYER SECTOR LOBBY · {roomSnapshot.isPublic ? 'PUBLIC ROOM' : 'PRIVATE ROOM'}{' '}
-                · {roomSnapshot.mode === 'COOP_SURVIVAL' ? 'CO-OP SURVIVAL' : 'FREE-FOR-ALL'}
+                · {GAME_MODE_LABELS[roomSnapshot.mode]?.short?.toUpperCase()}
               </div>
               <h1 className="font-display text-3xl font-bold text-white">
                 {roomSnapshot.roomName}
@@ -1184,7 +1253,7 @@ export default function App() {
                   </span>
                 </div>
                 <button
-                  onClick={() => handleCopyRoomCode(roomSnapshot.roomCode)}
+                  onClick={() => handleCopyRoomCode(roomSnapshot.roomCode, false)}
                   className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   {copiedCode ? (
@@ -1193,6 +1262,12 @@ export default function App() {
                     <Copy className="w-3.5 h-3.5" />
                   )}
                   {copiedCode ? 'Copied' : 'Copy Code'}
+                </button>
+                <button
+                  onClick={() => handleCopyRoomCode(roomSnapshot.roomCode, true)}
+                  className="px-3 py-1.5 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 rounded-lg text-xs font-medium text-cyan-300 transition-colors cursor-pointer"
+                >
+                  Copy Friend Link
                 </button>
               </div>
 
@@ -1214,9 +1289,48 @@ export default function App() {
                   {roomSnapshot.maxPlayers})
                 </h2>
                 <span className="text-xs font-mono text-slate-400">
-                  Share code {roomSnapshot.roomCode} with another browser window to play together
+                  Share code {roomSnapshot.roomCode} or Friend Link to play together
                 </span>
               </div>
+
+              {roomSnapshot.mode === 'TEAM_VS_TEAM' && (
+                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex items-center justify-between gap-4">
+                  <div className="text-xs text-slate-300">
+                    <span className="font-semibold text-white">Select Your Squadron:</span> Alpha Squadron (Cyan) vs Omega Squadron (Crimson)
+                  </div>
+                  {(() => {
+                    const me = roomSnapshot.players.find((p) => p.pilotId === pilotId);
+                    return (
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() =>
+                            handleLobbyCustomize(undefined, undefined, undefined, undefined, 'ALPHA')
+                          }
+                          className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold border transition-colors cursor-pointer ${
+                            me?.team === 'ALPHA'
+                              ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300'
+                              : 'bg-slate-950 border-slate-800 text-slate-400'
+                          }`}
+                        >
+                          ALPHA SQUAD
+                        </button>
+                        <button
+                          onClick={() =>
+                            handleLobbyCustomize(undefined, undefined, undefined, undefined, 'OMEGA')
+                          }
+                          className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold border transition-colors cursor-pointer ${
+                            me?.team === 'OMEGA'
+                              ? 'bg-rose-500/20 border-rose-400 text-rose-300'
+                              : 'bg-slate-950 border-slate-800 text-slate-400'
+                          }`}
+                        >
+                          OMEGA SQUAD
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
 
               <div className="border border-slate-800 rounded-2xl overflow-hidden bg-slate-900/40">
                 <table className="w-full text-left border-collapse text-sm">
@@ -1224,7 +1338,9 @@ export default function App() {
                     <tr className="border-b border-slate-800 bg-slate-950/60 text-xs font-mono text-slate-400">
                       <th className="py-3 px-4">CALLSIGN</th>
                       <th className="py-3 px-4">STARFIGHTER</th>
-                      <th className="py-3 px-4">LEVEL</th>
+                      <th className="py-3 px-4">
+                        {roomSnapshot.mode === 'TEAM_VS_TEAM' ? 'SQUADRON' : 'LEVEL'}
+                      </th>
                       <th className="py-3 px-4 text-right">STATUS</th>
                     </tr>
                   </thead>
@@ -1250,7 +1366,17 @@ export default function App() {
                             {SHIP_SPECS[p.shipType].name}
                           </td>
                           <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-400">
-                            LVL {p.level}
+                            {roomSnapshot.mode === 'TEAM_VS_TEAM' ? (
+                              <span
+                                className={
+                                  p.team === 'ALPHA' ? 'text-cyan-400 font-semibold' : 'text-rose-400 font-semibold'
+                                }
+                              >
+                                {p.team || 'ALPHA'}
+                              </span>
+                            ) : (
+                              `LVL ${p.level}`
+                            )}
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono text-xs">
                             {p.isReady || p.isHost ? (
@@ -1268,14 +1394,10 @@ export default function App() {
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
                 <div>
                   <h3 className="font-display font-semibold text-white text-base">
-                    {roomSnapshot.mode === 'COOP_SURVIVAL'
-                      ? 'Co-Op Wave Survival & Boss Raid'
-                      : 'Free-For-All Arena Combat'}
+                    {GAME_MODE_LABELS[roomSnapshot.mode]?.title}
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    {roomSnapshot.mode === 'COOP_SURVIVAL'
-                      ? 'Battle 10 escalating waves of server-controlled enemy squadrons and multi-phase bosses.'
-                      : 'Server-validated player-vs-player combat. First pilot to 2,000 points wins.'}
+                    {GAME_MODE_LABELS[roomSnapshot.mode]?.description}
                   </p>
                 </div>
 
@@ -1399,31 +1521,43 @@ export default function App() {
 
                   {/* Primary Action Controls */}
                   <div className="space-y-4">
-                    <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <button
-                        onClick={() => handleQuickPlay('COOP_SURVIVAL')}
-                        className="px-5 py-3.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-sm rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                        onClick={() => handleHostFriendMode('DUEL_1V1', 2)}
+                        className="px-4 py-3 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-sm rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Play className="w-4 h-4 fill-current" />
-                        Play Online (Co-Op)
+                        1 vs 1 Friend Duel
+                      </button>
+                      <button
+                        onClick={() => handleHostFriendMode('TEAM_VS_TEAM', 4)}
+                        className="px-4 py-3 bg-rose-500 hover:bg-rose-400 text-slate-950 font-semibold text-sm rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Team Battle (2v2 / 3v3)
                       </button>
                       <button
                         onClick={() => handleQuickPlay('FREE_FOR_ALL')}
-                        className="px-4 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-xl border border-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-xl border border-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Play Free-For-All
+                        Free-For-All (2–8)
+                      </button>
+                      <button
+                        onClick={() => handleQuickPlay('COOP_SURVIVAL')}
+                        className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-xl border border-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Co-Op Survival
                       </button>
                       <button
                         onClick={() => setShowCreateModal(true)}
-                        className="px-4 py-3.5 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-sm rounded-xl border border-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="px-4 py-3 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-sm rounded-xl border border-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Create Room
+                        Custom Room
                       </button>
                       <button
                         onClick={handleStartSoloDevMode}
-                        className="px-4 py-3.5 bg-slate-950 hover:bg-slate-900 text-amber-300 font-medium text-sm rounded-xl border border-amber-500/40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="px-4 py-3 bg-slate-950 hover:bg-slate-900 text-amber-300 font-medium text-sm rounded-xl border border-amber-500/40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Solo Dev Mode (No Backend)
+                        Solo Dev Mode
                       </button>
                     </div>
 
@@ -1576,7 +1710,7 @@ export default function App() {
                             <span>
                               {rm.mode === 'COOP_SURVIVAL'
                                 ? `CO-OP · WAVE ${rm.wave}`
-                                : 'FREE-FOR-ALL'}
+                                : GAME_MODE_LABELS[rm.mode]?.short?.toUpperCase() || 'PVP'}
                             </span>
                           </div>
                           <h3 className="font-display text-lg font-bold text-white truncate">
@@ -1687,7 +1821,7 @@ export default function App() {
                           <td className="py-3.5 px-4 font-mono text-xs text-slate-300">
                             {rm.mode === 'COOP_SURVIVAL'
                               ? `Co-Op Survival (Wave ${rm.wave})`
-                              : 'Free-For-All'}
+                              : GAME_MODE_LABELS[rm.mode]?.title || rm.mode}
                           </td>
                           <td className="py-3.5 px-4 text-slate-400">{rm.hostName}</td>
                           <td className="py-3.5 px-4 font-mono tabular-nums text-slate-300">
@@ -1884,10 +2018,10 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl">
+                <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl">
                   <button
                     onClick={() => setLeaderboardFilter('ALL')}
-                    className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       leaderboardFilter === 'ALL'
                         ? 'bg-cyan-500 text-slate-950 font-semibold'
                         : 'text-slate-400 hover:text-white'
@@ -1896,24 +2030,44 @@ export default function App() {
                     All Modes
                   </button>
                   <button
-                    onClick={() => setLeaderboardFilter('COOP_SURVIVAL')}
-                    className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      leaderboardFilter === 'COOP_SURVIVAL'
+                    onClick={() => setLeaderboardFilter('DUEL_1V1')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      leaderboardFilter === 'DUEL_1V1'
                         ? 'bg-cyan-500 text-slate-950 font-semibold'
                         : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    Co-Op Survival
+                    1v1 Duel
+                  </button>
+                  <button
+                    onClick={() => setLeaderboardFilter('TEAM_VS_TEAM')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      leaderboardFilter === 'TEAM_VS_TEAM'
+                        ? 'bg-cyan-500 text-slate-950 font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Team Battle
                   </button>
                   <button
                     onClick={() => setLeaderboardFilter('FREE_FOR_ALL')}
-                    className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       leaderboardFilter === 'FREE_FOR_ALL'
                         ? 'bg-cyan-500 text-slate-950 font-semibold'
                         : 'text-slate-400 hover:text-white'
                     }`}
                   >
                     Free-For-All
+                  </button>
+                  <button
+                    onClick={() => setLeaderboardFilter('COOP_SURVIVAL')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      leaderboardFilter === 'COOP_SURVIVAL'
+                        ? 'bg-cyan-500 text-slate-950 font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Co-Op Survival
                   </button>
                 </div>
               </div>
@@ -1949,7 +2103,7 @@ export default function App() {
                             {SHIP_SPECS[entry.shipType]?.name || entry.shipType}
                           </td>
                           <td className="py-3.5 px-4 text-xs text-slate-400">
-                            {entry.mode === 'COOP_SURVIVAL' ? 'Co-Op Survival' : 'Free-For-All'}
+                            {GAME_MODE_LABELS[entry.mode]?.short || entry.mode}
                           </td>
                           <td className="py-3.5 px-4 text-right text-emerald-400">{entry.kills}</td>
                           <td className="py-3.5 px-4 text-right text-slate-300">{entry.wave}</td>
@@ -2098,15 +2252,33 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2.5">
                 <button
                   type="button"
-                  onClick={() => setNewRoomMode('COOP_SURVIVAL')}
+                  onClick={() => {
+                    setNewRoomMode('DUEL_1V1');
+                    setNewRoomMaxPlayers(2);
+                  }}
                   className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
-                    newRoomMode === 'COOP_SURVIVAL'
+                    newRoomMode === 'DUEL_1V1'
                       ? 'bg-slate-800 border-cyan-500 text-white'
                       : 'bg-slate-950 border-slate-800 text-slate-400'
                   }`}
                 >
-                  <div className="font-display font-semibold text-sm">Co-Op Survival</div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">Survive waves & bosses</div>
+                  <div className="font-display font-semibold text-sm">1 vs 1 Friend Duel</div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">2-player head-to-head</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewRoomMode('TEAM_VS_TEAM');
+                    if (newRoomMaxPlayers < 4) setNewRoomMaxPlayers(4);
+                  }}
+                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                    newRoomMode === 'TEAM_VS_TEAM'
+                      ? 'bg-slate-800 border-cyan-500 text-white'
+                      : 'bg-slate-950 border-slate-800 text-slate-400'
+                  }`}
+                >
+                  <div className="font-display font-semibold text-sm">Team Battle (2v2–4v4)</div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">Alpha vs Omega Squad</div>
                 </button>
                 <button
                   type="button"
@@ -2117,8 +2289,20 @@ export default function App() {
                       : 'bg-slate-950 border-slate-800 text-slate-400'
                   }`}
                 >
-                  <div className="font-display font-semibold text-sm">Free-For-All</div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">PvP arena combat</div>
+                  <div className="font-display font-semibold text-sm">Free-For-All (2–8)</div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">Every pilot for themselves</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewRoomMode('COOP_SURVIVAL')}
+                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                    newRoomMode === 'COOP_SURVIVAL'
+                      ? 'bg-slate-800 border-cyan-500 text-white'
+                      : 'bg-slate-950 border-slate-800 text-slate-400'
+                  }`}
+                >
+                  <div className="font-display font-semibold text-sm">Co-Op Survival</div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">Survive waves & bosses</div>
                 </button>
               </div>
             </div>
@@ -2138,11 +2322,12 @@ export default function App() {
               <div>
                 <label className="block text-xs font-mono text-slate-400 mb-1.5">MAX PILOTS</label>
                 <select
-                  value={newRoomMaxPlayers}
+                  value={newRoomMode === 'DUEL_1V1' ? 2 : newRoomMaxPlayers}
+                  disabled={newRoomMode === 'DUEL_1V1'}
                   onChange={(e) => setNewRoomMaxPlayers(Number(e.target.value))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-cyan-500"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60"
                 >
-                  {[2, 4, 6, 8].map((n) => (
+                  {(newRoomMode === 'DUEL_1V1' ? [2] : [2, 3, 4, 6, 8]).map((n) => (
                     <option key={n} value={n}>
                       {n} Players
                     </option>
@@ -2258,11 +2443,31 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="pt-3 border-t border-slate-800 text-xs font-mono text-slate-400 space-y-1">
-                <div>
-                  VITE_BACKEND_URL: {configuredEnvBackendUrl || '(Not set — uses same-origin / dev)'}
+              <div className="pt-3 border-t border-slate-800 space-y-2">
+                <label className="block text-xs font-mono text-slate-300">
+                  MULTIPLAYER BACKEND URL (VITE_BACKEND_URL)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="url"
+                    value={backendUrlInput}
+                    onChange={(e) => setBackendUrlInput(e.target.value)}
+                    placeholder="https://your-backend.onrender.com"
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-cyan-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const clean = backendUrlInput.trim().replace(/\/+$/, '');
+                      localStorage.setItem('space_arena_custom_backend_url', clean);
+                      setCustomBackendUrl(clean);
+                    }}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-mono text-cyan-400 rounded-xl cursor-pointer whitespace-nowrap"
+                  >
+                    Connect
+                  </button>
                 </div>
-                <div>
+                <div className="text-[11px] font-mono text-slate-400">
                   SOCKET STATUS: {connected ? `Connected (${pingMs}ms)` : 'Offline (Solo Dev Mode Ready)'}
                 </div>
               </div>

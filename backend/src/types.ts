@@ -1,6 +1,8 @@
 export type ShipType = 'vanguard' | 'phantom' | 'titan' | 'nova';
 
-export type GameMode = 'COOP_SURVIVAL' | 'FREE_FOR_ALL';
+export type GameMode = 'COOP_SURVIVAL' | 'FREE_FOR_ALL' | 'DUEL_1V1' | 'TEAM_VS_TEAM';
+
+export type TeamId = 'ALPHA' | 'OMEGA';
 
 export type RoomStatus = 'LOBBY' | 'PLAYING' | 'VICTORY' | 'DEFEAT';
 
@@ -133,6 +135,7 @@ export interface PlayerState {
   username: string;
   shipType: ShipType;
   color: string;
+  team?: TeamId;
   isReady: boolean;
   isHost: boolean;
   connected: boolean;
@@ -248,6 +251,8 @@ export interface GameSnapshot {
   enemiesRemainingInWave: number;
   matchTimer: number;
   teamScore: number;
+  alphaScore?: number;
+  omegaScore?: number;
   targetScoreFFA: number;
   winnerName?: string;
   players: PlayerState[];
